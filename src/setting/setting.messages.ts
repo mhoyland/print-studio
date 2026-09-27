@@ -1,0 +1,33 @@
+export default {
+  mapWidget: 'Map widget',
+  options: 'Options',
+  allowViewerLayoutEdit: 'Allow viewers to adjust layout',
+  allowViewerLayoutEditHint: 'Lets anyone using this app nudge unlocked elements before exporting. Their changes only affect their own export, never this template.',
+  allowViewerAddElements: 'Allow viewers to add elements',
+  allowViewerAddElementsHint: 'Also lets viewers add new elements (text, images, tables, etc.) and delete or reorder the ones they added. Your own elements stay protected — they still can\'t be deleted or reordered, only nudged or restyled if unlocked.',
+  allowViewerCreateTemplates: 'Allow viewers to create templates',
+  allowViewerCreateTemplatesHint: 'Adds New and Duplicate to the template list at runtime. A viewer\'s own templates are fully editable by them, kept in their browser (they can export them to a file), and never change your templates.',
+  templates: 'Templates',
+  noTemplatesYet: 'No templates yet — add one below, or import one from a file.',
+  newTemplateLabel: 'New',
+  newTemplateTooltip: 'New template',
+  importLabel: 'Import',
+  importTooltip: 'Import from file',
+  exportToFile: 'Export to file',
+  saveToPortal: 'Save to Portal',
+  updateOnPortal: 'Update on Portal',
+  savedToPortal: 'Saved to Portal',
+  loadFromPortalLabel: 'Portal',
+  loadFromPortalTooltip: 'Load from Portal',
+  edit: 'Edit',
+  duplicate: 'Duplicate',
+  delete: 'Delete',
+  confirmDelete: 'Confirm delete?',
+
+  // Portal template picker
+  loadTemplateFromPortal: 'Load template from Portal',
+  searchingPortalItemsEllipsis: 'Searching your Portal items…',
+  noTemplatesFoundInPortal: 'No templates found in your Portal content.',
+  loadingEllipsis: 'Loading…',
+  load: 'Load'
+}

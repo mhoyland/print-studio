@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+
+# Internal design-reference screenshots used while building this widget — not needed to run or
+# understand it, and not authored by this repo, so they're excluded rather than published.
+assets/design-reference/

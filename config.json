@@ -1,0 +1,103 @@
+{
+  "templates": [
+    {
+      "id": "default",
+      "name": "Map Export",
+      "pageSize": "letter",
+      "orientation": "portrait",
+      "elements": [
+        {
+          "id": "mapFrame",
+          "name": "Map frame",
+          "type": "mapFrame",
+          "x": 40,
+          "y": 120,
+          "w": 1195,
+          "h": 1350,
+          "zIndex": 0,
+          "locked": true,
+          "visible": true
+        },
+        {
+          "id": "title",
+          "name": "Title",
+          "type": "text",
+          "x": 40,
+          "y": 30,
+          "w": 900,
+          "h": 70,
+          "zIndex": 1,
+          "locked": false,
+          "visible": true,
+          "text": "Map Title",
+          "fontFamily": "Arial",
+          "fontSize": 32,
+          "fontWeight": 700,
+          "color": "#000000",
+          "align": "left",
+          "editableAtRuntime": true
+        },
+        {
+          "id": "logo",
+          "name": "Logo",
+          "type": "image",
+          "x": 1000,
+          "y": 20,
+          "w": 235,
+          "h": 80,
+          "zIndex": 2,
+          "locked": true,
+          "visible": true,
+          "source": "upload",
+          "lockAspect": true
+        },
+        {
+          "id": "legend",
+          "name": "Legend",
+          "type": "legend",
+          "x": 40,
+          "y": 1480,
+          "w": 300,
+          "h": 120,
+          "zIndex": 3,
+          "locked": true,
+          "visible": true,
+          "autoFitHeight": false,
+          "strokeColor": "#999999",
+          "strokeWidth": 1,
+          "fill": { "enabled": true, "color": "#ffffff" }
+        },
+        {
+          "id": "scaleBar",
+          "name": "Scale bar",
+          "type": "scaleBar",
+          "x": 380,
+          "y": 1540,
+          "w": 300,
+          "h": 40,
+          "zIndex": 4,
+          "locked": true,
+          "visible": true,
+          "unit": "km",
+          "style": "line"
+        },
+        {
+          "id": "northArrow",
+          "name": "North arrow",
+          "type": "northArrow",
+          "x": 1150,
+          "y": 1480,
+          "w": 85,
+          "h": 85,
+          "zIndex": 5,
+          "locked": true,
+          "visible": true,
+          "style": "classic",
+          "color": "#000000",
+          "rotation": 0,
+          "syncToMapRotation": true
+        }
+      ]
+    }
+  ]
+}

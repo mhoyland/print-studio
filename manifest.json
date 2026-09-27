@@ -1,0 +1,21 @@
+{
+  "name": "print-studio",
+  "label": "Print Studio",
+  "type": "widget",
+  "version": "1.21.0",
+  "exbVersion": "1.21.0",
+  "author": "",
+  "description": "A print/export composer with vector PDF and GeoPDF output, a drag-and-drop layout editor, reusable across Experiences as saved templates.",
+  "copyright": "",
+  "license": "MIT",
+  "dependency": "jimu-arcgis",
+  "settingDependency": "jimu-arcgis",
+  "properties": {},
+  "translatedLocales": [
+    "en"
+  ],
+  "defaultSize": {
+    "width": 360,
+    "height": 320
+  }
+}

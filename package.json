@@ -1,0 +1,10 @@
+{
+  "name": "print-studio",
+  "version": "1.21.0",
+  "private": true,
+  "description": "Widget-level dependencies for the Print Studio Experience Builder widget.",
+  "license": "MIT",
+  "dependencies": {
+    "jspdf": "^4.2.1"
+  }
+}
