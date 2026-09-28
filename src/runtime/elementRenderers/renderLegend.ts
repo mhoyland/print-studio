@@ -6,11 +6,7 @@ import type { Painter } from './painter'
 
 export const DEFAULT_FONT_SIZE = 11
 export const DEFAULT_TITLE = 'Legend'
-const MIN_COLUMN_WIDTH = 90 // logical px before scaling — enough for a swatch + a short label
-const MAX_RAMP_WIDTH = 200 // logical px before scaling — keeps a ramp bar from stretching the full
-                            // width of a wide legend box; the swatch grid isn't capped the same way,
-                            // since spreading it across more columns is what frees room for this bar
-const INDENT_WIDTH = 12 // logical px before scaling, per nesting level — see LegendGroup.indent
+const MAX_RAMP_WIDTH = 200 // logical px before scaling — keeps a ramp bar from stretching across a wide column
 const MAX_TITLE_LINES = 2 // caps how far a long layer/section title or swatch label wraps before
                            // the last shown line gets ellipsized — see textLayout.ts's wrapText
 
@@ -32,18 +28,6 @@ export interface LegendGroup {
   title: string
   indent: number // 0 = a top-level layer; 1+ = a nested sub-layer (e.g. a census layer's "County")
   rows: LegendRow[]
-}
-
-// The handful of values every paint* helper below needs, bundled into one object purely to keep each
-// function's own parameter count down (each used to take `top`/`bottom`/`fontSize`/`scale`/`padding` as
-// five separate trailing parameters, tripping the max-params lint rule) — `bottom` is the one absolute
-// Y coordinate content must not be drawn past; `top`, which changes at every call as drawing proceeds
-// down the page, stays its own separate parameter rather than joining this object.
-interface LegendPaintStyle {
-  bottom: number
-  fontSize: number
-  scale: number
-  padding: number
 }
 
 // Reuses the ArcGIS Maps SDK's own Legend logic (LegendViewModel — the same class the built-in Legend
@@ -278,22 +262,33 @@ function drawPathIcon (ctx: Painter, icon: IconShape, centerX: number, centerY: 
   ctx.restore()
 }
 
-// Draws `text` left-aligned at (x, top), wrapped onto up to MAX_TITLE_LINES lines if it doesn't fit
-// `maxWidth` (the last shown line ellipsized if it still doesn't, rather than overflowing past
-// whatever's drawn next to or below it — the bug this was added to fix). Returns the vertical space
-// the (possibly multi-line) text used — zero, drawing nothing, for an empty title (some legend
-// elements, e.g. a relationship-ramp, legitimately have no title of their own from the SDK; reserving
-// a blank line for one would just leave an odd gap, and substituting the enclosing group's own layer
-// title as a fallback there previously produced a visible duplicate of it right below itself). Caller
-// sets `ctx.font` beforehand; textBaseline is 'middle' throughout this renderer, so each line's own y
-// is that line's vertical center.
-function drawWrappedTitle (ctx: Painter, text: string, x: number, top: number, maxWidth: number, lineHeight: number): number {
-  if (!text) return 0
-  const lines = wrapText(ctx, text, maxWidth, MAX_TITLE_LINES)
-  ctx.textAlign = 'left'
-  lines.forEach((line, index) => { ctx.fillText(line, x, top + lineHeight / 2 + index * lineHeight) })
-  return lines.length * lineHeight
+// --- Layout: rows that flow through columns -------------------------------------------------------
+//
+// Layers are placed in columns like newspaper text. Where they fit, whole layers go into columns (a
+// layer's symbols stay together). Where they don't, a layer flows: every layer is a sequence of blocks
+// (its heading, one per symbol row, one per graduated-circle row, one per colour ramp or bivariate
+// grid) that continue at the top of the next column. A heading is kept with the block after it, so it
+// is never stranded at the bottom of a column, and a continued layer carries on without repeating its
+// heading, as ArcGIS Pro does. Columns are balanced (as short as possible) and all the requested
+// columns are used when there's enough to put in them. With `columns: 'auto'`, the fewest columns
+// that fit the box are used, as width allows.
+
+interface Block {
+  height: number
+  // True for headings: a column break is never placed straight after this block.
+  keepWithNext?: boolean
+  draw: (x: number, y: number) => void
 }
+
+interface LegendMetrics {
+  fontSize: number
+  scale: number
+  padding: number
+}
+
+const COLUMN_GAP = 16 // logical px before scaling, between columns
+const AUTO_MIN_COLUMN_WIDTH = 150 // logical px before scaling — the narrowest column 'auto' will use
+const MAX_AUTO_COLUMNS = 6
 
 export function paintLegend (ctx: Painter, element: LegendElement, groups: LegendGroup[]): void {
   const isVisible = element.visible ?? true
@@ -304,215 +299,227 @@ export function paintLegend (ctx: Painter, element: LegendElement, groups: Legen
   const fontSize = element.fontSize ?? DEFAULT_FONT_SIZE
   const scale = fontSize / DEFAULT_FONT_SIZE
   const padding = 6 * scale
-  const titleLineHeight = fontSize * 1.3
+  const metrics: LegendMetrics = { fontSize, scale, padding }
   const showTitle = element.showTitle ?? true
-  const bottom = element.y + element.h
+  const contentLeft = element.x + padding
+  const contentWidth = Math.max(0, element.w - padding * 2)
+  const bottom = element.y + element.h - padding
 
   ctx.save()
   ctx.textBaseline = 'middle'
   ctx.textAlign = 'left'
 
-  let cursorY = element.y
+  // The legend's own title spans all columns.
+  let top = element.y + padding
   if (showTitle) {
-    cursorY += padding
     ctx.font = `bold ${fontSize}px sans-serif`
     ctx.fillStyle = '#000000'
-    cursorY += drawWrappedTitle(ctx, element.title ?? DEFAULT_TITLE, element.x + padding, cursorY, element.w - padding * 2, titleLineHeight)
-    cursorY += padding
+    const titleLineHeight = fontSize * 1.3
+    const lines = wrapTitle(ctx, element.title ?? DEFAULT_TITLE, contentWidth)
+    drawLines(ctx, lines, contentLeft, top, titleLineHeight)
+    top += lines.length * titleLineHeight + padding
+  }
+  const columnHeight = Math.max(0, bottom - top)
+
+  const gap = COLUMN_GAP * scale
+  // For a column count: the column width, and the units to place — whole layers if they fit the box,
+  // otherwise individual blocks so layers can flow on into the next column.
+  const layoutFor = (columnCount: number): { width: number; units: Block[]; fits: boolean } => {
+    const width = Math.max(0, (contentWidth - gap * (columnCount - 1)) / columnCount)
+    const layerBlocks = groups.map((group) => groupBlocks(ctx, group, width, metrics))
+    const wholeLayers = layerBlocks.map(combineBlocks)
+    if (flow(wholeLayers, columnCount, columnHeight).fits) return { width, units: wholeLayers, fits: true }
+    const blocks = layerBlocks.flat()
+    return { width, units: blocks, fits: flow(blocks, columnCount, columnHeight).fits }
   }
 
-  const style: LegendPaintStyle = { bottom, fontSize, scale, padding }
-  for (const group of groups) {
-    if (cursorY >= bottom) break
-    cursorY += paintGroup(ctx, element, group, cursorY, style)
+  let columnCount: number
+  let layout: { width: number; units: Block[]; fits: boolean }
+  if (element.columns && element.columns !== 'auto') {
+    columnCount = element.columns
+    layout = layoutFor(columnCount)
+  } else {
+    // Fewest columns that fit the box's height, no narrower than AUTO_MIN_COLUMN_WIDTH.
+    const maxByWidth = Math.max(1, Math.min(MAX_AUTO_COLUMNS, Math.floor((contentWidth + gap) / (AUTO_MIN_COLUMN_WIDTH * scale + gap))))
+    columnCount = 1
+    layout = layoutFor(1)
+    while (columnCount < maxByWidth && !layout.fits) {
+      columnCount++
+      layout = layoutFor(columnCount)
+    }
   }
+
+  const columns = flow(layout.units, columnCount, balancedHeight(layout.units, columnCount, columnHeight)).columns
+  columns.slice(0, columnCount).forEach((column, index) => {
+    const x = contentLeft + index * (layout.width + gap)
+    let y = top
+    for (const block of column) {
+      // Anything that still doesn't fit the box is left off, as before, rather than drawn past its edge.
+      if (y + block.height > bottom + 0.5) break
+      block.draw(x, y)
+      y += block.height
+    }
+  })
 
   ctx.restore()
 }
 
-// Draws one layer's title (indented per group.indent — a nested sub-layer's heading sits slightly
-// smaller and offset from its parent layer's own title) followed by that layer's own symbology only —
-// swatches (its own multi-column layout, independent of every other group's), then ramps, relationship
-// grids, and size ramps below. Returns the total vertical space this group used.
-function paintGroup (
-  ctx: Painter,
-  element: LegendElement,
-  group: LegendGroup,
-  top: number,
-  style: LegendPaintStyle
-): number {
-  const { fontSize, scale, padding } = style
-  const indentPx = group.indent * INDENT_WIDTH * scale
-  const indentedElement: LegendElement = { ...element, x: element.x + indentPx, w: Math.max(0, element.w - indentPx) }
-
-  let cursorY = top
-  const headerFontSize = group.indent === 0 ? fontSize : Math.max(4, fontSize - 1)
-  const headerLineHeight = headerFontSize * 1.3
-  ctx.font = `bold ${headerFontSize}px sans-serif`
-  ctx.fillStyle = '#000000'
-  cursorY += drawWrappedTitle(ctx, group.title, indentedElement.x + padding, cursorY, indentedElement.w - padding * 2, headerLineHeight)
-  cursorY += padding / 2
-
-  const swatchRows = group.rows.filter((row): row is Extract<LegendRow, { kind: 'swatch' }> => row.kind === 'swatch')
-  const rampRows = group.rows.filter((row): row is Extract<LegendRow, { kind: 'ramp' }> => row.kind === 'ramp')
-  const relationshipRows = group.rows.filter((row): row is Extract<LegendRow, { kind: 'relationship' }> => row.kind === 'relationship')
-  const sizeRows = group.rows.filter((row): row is Extract<LegendRow, { kind: 'size' }> => row.kind === 'size')
-
-  cursorY += paintSwatches(ctx, indentedElement, swatchRows, cursorY, style)
-  cursorY += paintRamps(ctx, indentedElement, rampRows, cursorY, style)
-  cursorY += paintRelationships(ctx, indentedElement, relationshipRows, cursorY, style)
-  cursorY += paintSizeRamps(ctx, indentedElement, sizeRows, cursorY, style)
-
-  return cursorY - top + padding // trailing gap before the next group
+// Places blocks into columns no taller than `height`. `fits` is false if they need more than
+// `columnCount` columns, or a single block is taller than a column.
+function flow (blocks: Block[], columnCount: number, height: number): { fits: boolean; columns: Block[][] } {
+  const columns: Block[][] = [[]]
+  let used = 0
+  let fits = true
+  blocks.forEach((block, index) => {
+    const next = blocks[index + 1]
+    const needed = block.height + (block.keepWithNext && next ? next.height : 0)
+    // Once there are only as many units left as empty columns, give each its own column, so all the
+    // requested columns are used rather than leaving the last ones empty.
+    const unitsLeft = blocks.length - index
+    const emptyColumnsLeft = columnCount - columns.length
+    if (used > 0 && (used + needed > height || unitsLeft <= emptyColumnsLeft)) {
+      columns.push([])
+      used = 0
+    }
+    columns[columns.length - 1].push(block)
+    used += block.height
+    if (used > height + 0.5) fits = false
+  })
+  return { fits: fits && columns.length <= columnCount, columns }
 }
 
-// Returns the vertical space actually used.
-function paintSwatches (
-  ctx: Painter,
-  element: LegendElement,
-  rows: Array<Extract<LegendRow, { kind: 'swatch' }>>,
-  top: number,
-  style: LegendPaintStyle
-): number {
-  if (rows.length === 0) return 0
-  const { bottom, fontSize, scale, padding } = style
-
-  const swatchSize = 12 * scale
-  const singleLineRowHeight = 18 * scale
-  const labelLineHeight = fontSize * 1.15
-  const labelGap = 6 * scale
-  const availableWidth = element.w - padding * 2
-  const availableHeight = bottom - top - padding * 2
-
-  // Entries that don't fit in one column spill into additional columns to the right, filling each
-  // column top-to-bottom before starting the next (matching how a printed legend is usually read) —
-  // rather than being clipped once the box height runs out. Columns are equal width, not auto-sized
-  // to each column's own longest label, which keeps this simple at the cost of some wasted space
-  // when one column's labels are much shorter than another's. Column count/width is figured out first
-  // assuming single-line labels (below); once columnWidth is known, labels that don't actually fit it
-  // get wrapped, which can grow the row height beyond that initial single-line assumption — see the
-  // second pass after columnWidth is computed.
-  const rowsPerColumnFromHeight = Math.max(1, Math.floor(availableHeight / singleLineRowHeight))
-
-  let columnCount: number
-  let rowsPerColumn: number
-  if (element.columns && element.columns !== 'auto') {
-    // A designer-fixed column count — always exactly this many, never auto-adjusted by the box's own
-    // width/height the way 'auto' is below. Entries that still don't fit vertically at that fixed
-    // count are clipped the same way an auto-fit legend is when its box is too short, rather than
-    // silently growing extra columns to compensate.
-    columnCount = element.columns
-    rowsPerColumn = Math.max(1, Math.min(rowsPerColumnFromHeight, Math.ceil(rows.length / columnCount)))
-  } else {
-    // Row count is capped by whichever is *smaller* — how many rows the available height allows, or
-    // how few rows are actually needed once entries are spread across every column the available width
-    // allows. Using only the height-derived row count meant widening a legend box never reduced how many
-    // rows the swatches used, even though the box had the width to spare — which left a wide-but-short
-    // box with no room for a ramp section below, since the swatches always claimed as many rows as they
-    // technically could regardless of unused spare width. (The ramp bar itself is capped at
-    // MAX_RAMP_WIDTH instead of being left to stretch the full box width — see paintRamps — so this
-    // doesn't also need a column cap of its own to keep a wide legend from looking stretched.)
-    const maxColumnsByWidth = Math.max(1, Math.floor(availableWidth / (MIN_COLUMN_WIDTH * scale)))
-    const minRowsAtMaxColumns = Math.ceil(rows.length / maxColumnsByWidth)
-    rowsPerColumn = Math.max(1, Math.min(rowsPerColumnFromHeight, minRowsAtMaxColumns))
-    const columnsNeeded = Math.ceil(rows.length / rowsPerColumn)
-    columnCount = Math.max(1, Math.min(columnsNeeded, maxColumnsByWidth))
+// The shortest column height (up to the box's) that still fits every block into `columnCount` columns,
+// so the columns come out even. If nothing fits, the box's own height (the overflow is then left off).
+function balancedHeight (blocks: Block[], columnCount: number, maxHeight: number): number {
+  if (columnCount <= 1 || !flow(blocks, columnCount, maxHeight).fits) return maxHeight
+  let low = Math.max(0, ...blocks.map((block) => block.height))
+  let high = maxHeight
+  while (high - low > 0.5) {
+    const mid = (low + high) / 2
+    if (flow(blocks, columnCount, mid).fits) high = mid
+    else low = mid
   }
-  const columnWidth = availableWidth / columnCount
-  const labelMaxWidth = Math.max(0, columnWidth - swatchSize - labelGap - padding / 2)
+  return high
+}
 
-  ctx.font = `${fontSize}px sans-serif`
-
-  // Labels that don't fit their column's own width wrap onto up to MAX_TITLE_LINES lines (ellipsized
-  // if still too long) instead of overflowing past the column into whatever's drawn next to it. Every
-  // row in this swatch grid shares one uniform height, sized to the tallest wrapped label actually
-  // shown — simpler than variable per-row heights, at the cost of some unused space next to shorter
-  // labels — and re-deriving how many rows fit at that (possibly taller) height can mean fewer entries
-  // fit than the single-line estimate above assumed; anything that no longer fits is clipped, same as
-  // this grid already does whenever a legend simply has more entries than room.
-  const candidateRows = rows.slice(0, columnCount * rowsPerColumn)
-  const wrappedLabels = candidateRows.map((row) => wrapText(ctx, row.label, labelMaxWidth, MAX_TITLE_LINES))
-  const maxLines = Math.max(1, ...wrappedLabels.map((lines) => lines.length))
-  const rowHeight = Math.max(swatchSize, maxLines * labelLineHeight) + 4 * scale
-
-  const actualRowsPerColumn = Math.max(1, Math.floor(availableHeight / rowHeight))
-  const rowsUsed = Math.min(actualRowsPerColumn, rowsPerColumn)
-  const visibleCount = Math.min(candidateRows.length, columnCount * rowsUsed)
-  const visibleRows = candidateRows.slice(0, visibleCount)
-  const visibleLabels = wrappedLabels.slice(0, visibleCount)
-
-  visibleRows.forEach((row, index) => {
-    const columnIndex = Math.floor(index / rowsUsed)
-    const rowIndex = index % rowsUsed
-    const entryX = element.x + padding + columnIndex * columnWidth
-    const entryY = top + padding + rowIndex * rowHeight
-    const lines = visibleLabels[index]
-
-    if (row.icon) {
-      drawPathIcon(ctx, row.icon, entryX + swatchSize / 2, entryY + swatchSize / 2, swatchSize)
-    } else {
-      ctx.fillStyle = row.color
-      ctx.fillRect(entryX, entryY, swatchSize, swatchSize)
-      ctx.strokeStyle = '#999999'
-      ctx.strokeRect(entryX, entryY, swatchSize, swatchSize)
+// A whole layer as one unbreakable unit.
+function combineBlocks (blocks: Block[]): Block {
+  return {
+    height: blocks.reduce((sum, block) => sum + block.height, 0),
+    draw: (x, y) => {
+      let top = y
+      for (const block of blocks) {
+        block.draw(x, top)
+        top += block.height
+      }
     }
+  }
+}
 
-    ctx.fillStyle = '#000000'
-    ctx.textAlign = 'left'
-    const textBlockHeight = lines.length * labelLineHeight
-    const textStartY = entryY + Math.max(swatchSize, textBlockHeight) / 2 - textBlockHeight / 2 + labelLineHeight / 2
-    lines.forEach((line, lineIndex) => {
-      ctx.fillText(line, entryX + swatchSize + labelGap, textStartY + lineIndex * labelLineHeight)
-    })
+// --- Blocks for one layer --------------------------------------------------------------------------
+
+// A layer's heading (indented per nesting level — a sub-layer's heading is slightly smaller) followed
+// by its symbology: symbol rows, then colour ramps, bivariate grids and graduated circles.
+function groupBlocks (ctx: Painter, group: LegendGroup, columnWidth: number, metrics: LegendMetrics): Block[] {
+  const { fontSize, padding } = metrics
+  // Sub-layers line up with every other layer (no indent); their smaller heading below shows the hierarchy.
+  const indent = 0
+  const width = Math.max(0, columnWidth - indent)
+  const blocks: Block[] = []
+
+  const headerFontSize = group.indent === 0 ? fontSize : Math.max(4, fontSize - 1)
+  const headerFont = `bold ${headerFontSize}px sans-serif`
+  const headerLineHeight = headerFontSize * 1.3
+  ctx.font = headerFont
+  const headerLines = group.title ? wrapTitle(ctx, group.title, width) : []
+  blocks.push({
+    height: headerLines.length * headerLineHeight + padding / 2,
+    keepWithNext: true,
+    draw: (x, y) => {
+      ctx.font = headerFont
+      ctx.fillStyle = '#000000'
+      drawLines(ctx, headerLines, x + indent, y, headerLineHeight)
+    }
   })
 
-  return rowsUsed > 0 ? padding * 2 + rowsUsed * rowHeight : 0
+  const swatches = group.rows.filter((row): row is Extract<LegendRow, { kind: 'swatch' }> => row.kind === 'swatch')
+  const sectionStart = blocks.length
+  blocks.push(...swatches.map((row) => swatchBlock(ctx, row, indent, width, metrics)))
+  for (const row of group.rows) {
+    if (row.kind === 'ramp') blocks.push(rampBlock(ctx, row, indent, width, metrics))
+    else if (row.kind === 'relationship') blocks.push(relationshipBlock(ctx, row, indent, width, metrics))
+    else if (row.kind === 'size') blocks.push(...sizeBlocks(ctx, row, indent, width, metrics))
+  }
+  // Space after the layer, before the next one's heading.
+  if (blocks.length > sectionStart) blocks[blocks.length - 1].height += padding
+  return blocks
 }
 
-function paintRamps (
-  ctx: Painter,
-  element: LegendElement,
-  rows: Array<Extract<LegendRow, { kind: 'ramp' }>>,
-  top: number,
-  style: LegendPaintStyle
-): number {
-  if (rows.length === 0) return 0
-  const { bottom, fontSize, scale, padding } = style
+function swatchBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'swatch' }>, indent: number, width: number, metrics: LegendMetrics): Block {
+  const { fontSize, scale } = metrics
+  const swatchSize = 12 * scale
+  const labelGap = 6 * scale
+  const labelLineHeight = fontSize * 1.15
+  const font = `${fontSize}px sans-serif`
+  ctx.font = font
+  const lines = wrapText(ctx, row.label, Math.max(0, width - swatchSize - labelGap), MAX_TITLE_LINES)
+  const textHeight = lines.length * labelLineHeight
+  const height = Math.max(swatchSize, textHeight) + 4 * scale
+  return {
+    height,
+    draw: (x, y) => {
+      const left = x + indent
+      if (row.icon) {
+        drawPathIcon(ctx, row.icon, left + swatchSize / 2, y + swatchSize / 2, swatchSize)
+      } else {
+        ctx.fillStyle = row.color
+        ctx.fillRect(left, y, swatchSize, swatchSize)
+        ctx.strokeStyle = '#999999'
+        ctx.strokeRect(left, y, swatchSize, swatchSize)
+      }
+      ctx.font = font
+      ctx.fillStyle = '#000000'
+      ctx.textAlign = 'left'
+      const textTop = y + Math.max(swatchSize, textHeight) / 2 - textHeight / 2
+      drawLines(ctx, lines, left + swatchSize + labelGap, textTop, labelLineHeight)
+    }
+  }
+}
 
+// A continuous colour ramp: its title, the gradient bar, and the first and last stop labels — kept
+// together in one block. The bar is capped at MAX_RAMP_WIDTH so a wide column doesn't stretch it.
+function rampBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'ramp' }>, indent: number, width: number, metrics: LegendMetrics): Block {
+  const { fontSize, scale } = metrics
   const titleLineHeight = fontSize * 1.3
   const barHeight = 14 * scale
   const barGap = 4 * scale
   const rampGap = 10 * scale
-  // Capped rather than stretched to the box's full width — a legend box widened to fit more swatch
-  // columns would otherwise drag the ramp bar out to a stretched, disproportionate length with it.
-  // Left-aligned (not centered), matching the title/swatches above it.
-  const barWidth = Math.max(0, Math.min(MAX_RAMP_WIDTH * scale, element.w - padding * 2))
-  const barX = element.x + padding
-  const titleMaxWidth = Math.max(barWidth, element.w - padding * 2)
-
-  let cursorY = top
-  for (const row of rows) {
-    if (cursorY + titleLineHeight * MAX_TITLE_LINES + barGap + barHeight > bottom) break
-
-    ctx.font = `bold ${fontSize}px sans-serif`
-    ctx.fillStyle = '#000000'
-    cursorY += drawWrappedTitle(ctx, row.title, barX, cursorY, titleMaxWidth, titleLineHeight)
-    cursorY += barGap
-
-    if (row.stops.length > 0 && barWidth > 0) {
+  const barWidth = Math.max(0, Math.min(MAX_RAMP_WIDTH * scale, width))
+  const titleFont = `bold ${fontSize}px sans-serif`
+  const labelFont = `${fontSize}px sans-serif`
+  ctx.font = titleFont
+  const titleLines = row.title ? wrapTitle(ctx, row.title, width) : []
+  const hasBar = row.stops.length > 0 && barWidth > 0
+  const height = titleLines.length * titleLineHeight + barGap + (hasBar ? barHeight + barGap + fontSize : 0) + rampGap
+  return {
+    height,
+    draw: (x, y) => {
+      const barX = x + indent
+      ctx.font = titleFont
+      ctx.fillStyle = '#000000'
+      drawLines(ctx, titleLines, barX, y, titleLineHeight)
+      if (!hasBar) return
+      const barY = y + titleLines.length * titleLineHeight + barGap
       const gradient = ctx.createLinearGradient(barX, 0, barX + barWidth, 0)
       const lastIndex = row.stops.length - 1
-      row.stops.forEach((stop, index) => {
-        gradient.addColorStop(lastIndex === 0 ? 0 : index / lastIndex, stop.color)
-      })
+      row.stops.forEach((stop, index) => { gradient.addColorStop(lastIndex === 0 ? 0 : index / lastIndex, stop.color) })
       ctx.fillStyle = gradient
-      ctx.fillRect(barX, cursorY, barWidth, barHeight)
+      ctx.fillRect(barX, barY, barWidth, barHeight)
       ctx.strokeStyle = '#999999'
-      ctx.strokeRect(barX, cursorY, barWidth, barHeight)
-
-      ctx.font = `${fontSize}px sans-serif`
+      ctx.strokeRect(barX, barY, barWidth, barHeight)
+      ctx.font = labelFont
       ctx.fillStyle = '#000000'
-      const labelY = cursorY + barHeight + barGap + fontSize / 2
+      const labelY = barY + barHeight + barGap + fontSize / 2
       ctx.textAlign = 'left'
       ctx.fillText(row.stops[0].label, barX, labelY)
       if (lastIndex > 0) {
@@ -520,152 +527,138 @@ function paintRamps (
         ctx.fillText(row.stops[lastIndex].label, barX + barWidth, labelY)
       }
       ctx.textAlign = 'left'
-      cursorY += barHeight + barGap + fontSize + rampGap
-    } else {
-      cursorY += rampGap
     }
   }
-  return cursorY - top
 }
 
-// A bivariate "relationship" renderer's color grid (e.g. Esri's "Klimaateffectatlas" layer combining
-// two fields into one NxN color matrix) — drawn as its own titled square grid, centered within the
-// available width (rather than flush left, which left it stranded in one corner while the corner
-// labels' free side sat mostly empty), with the SDK's own computed corner labels flanking its left/
-// right edges directly. This mirrors the built-in Legend widget's own (non-diamond) corner placement —
-// `left` at the top-left, `top` at the top-right, `bottom` at the bottom-left, and `right` at the
-// bottom-right — rather than a full pixel match of its 45°-rotated "diamond" layout (used when the
-// renderer has a `focus` value), which also draws small axis-direction arrow lines that aren't
-// reachable from outside the SDK's own unexported rendering code.
-function paintRelationships (
-  ctx: Painter,
-  element: LegendElement,
-  rows: Array<Extract<LegendRow, { kind: 'relationship' }>>,
-  top: number,
-  style: LegendPaintStyle
-): number {
-  if (rows.length === 0) return 0
-  const { bottom, fontSize, scale, padding } = style
-
+// A bivariate "relationship" renderer's colour grid, drawn as its own titled square grid centred in the
+// column, with the SDK's corner labels beside it — `left` top-left, `top` top-right, `bottom`
+// bottom-left, `right` bottom-right, mirroring the built-in Legend widget's (non-diamond) layout.
+// Kept together in one block.
+function relationshipBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'relationship' }>, indent: number, width: number, metrics: LegendMetrics): Block {
+  const { fontSize, scale } = metrics
   const titleLineHeight = fontSize * 1.3
   const cellSize = 14 * scale
   const cornerFontSize = Math.max(4, fontSize - 2)
   const cornerLineHeight = cornerFontSize * 1.2
   const sectionGap = 10 * scale
   const labelGap = 6 * scale
-  const contentLeft = element.x + padding
-  const maxLabelWidth = Math.max(0, element.w - padding * 2)
+  const gridSize = Math.max(1, row.colors.length) * cellSize
+  const gridOffset = Math.max(0, (width - gridSize) / 2)
+  const sideLabelWidth = Math.max(0, gridOffset - labelGap)
+  const titleFont = `bold ${fontSize}px sans-serif`
+  const cornerFont = `${cornerFontSize}px sans-serif`
 
-  let cursorY = top
-  for (const row of rows) {
-    const gridSize = Math.max(1, row.colors.length) * cellSize
-    const gridX = contentLeft + Math.max(0, (maxLabelWidth - gridSize) / 2)
-    // The margin freed up on either side of the now-centered grid, minus a small gap — since the grid
-    // is centered, this is the same on both sides, so one width serves both left and right labels.
-    const sideLabelWidth = Math.max(0, gridX - contentLeft - labelGap)
+  ctx.font = titleFont
+  const titleLines = row.title ? wrapTitle(ctx, row.title, width) : []
+  ctx.font = cornerFont
+  const wrap = (text: string): string[] => (text ? wrapText(ctx, text, sideLabelWidth, MAX_TITLE_LINES) : [])
+  const leftLines = wrap(row.labels.left)
+  const topLines = wrap(row.labels.top)
+  const bottomLines = wrap(row.labels.bottom)
+  const rightLines = wrap(row.labels.right)
+  const aboveLines = Math.max(leftLines.length, topLines.length)
+  const belowLines = Math.max(bottomLines.length, rightLines.length)
+  const height = titleLines.length * titleLineHeight + (aboveLines + belowLines) * cornerLineHeight + gridSize + sectionGap
 
-    ctx.font = `${cornerFontSize}px sans-serif`
-    const leftLines = row.labels.left ? wrapText(ctx, row.labels.left, sideLabelWidth, MAX_TITLE_LINES) : []
-    const topLines = row.labels.top ? wrapText(ctx, row.labels.top, sideLabelWidth, MAX_TITLE_LINES) : []
-    const bottomLines = row.labels.bottom ? wrapText(ctx, row.labels.bottom, sideLabelWidth, MAX_TITLE_LINES) : []
-    const rightLines = row.labels.right ? wrapText(ctx, row.labels.right, sideLabelWidth, MAX_TITLE_LINES) : []
-    const aboveLines = Math.max(leftLines.length, topLines.length)
-    const belowLines = Math.max(bottomLines.length, rightLines.length)
+  return {
+    height,
+    draw: (x, y) => {
+      const left = x + indent
+      const gridX = left + gridOffset
+      let cursorY = y
+      ctx.font = titleFont
+      ctx.fillStyle = '#000000'
+      drawLines(ctx, titleLines, left, cursorY, titleLineHeight)
+      cursorY += titleLines.length * titleLineHeight
 
-    const blockHeight = titleLineHeight + aboveLines * cornerLineHeight + gridSize + belowLines * cornerLineHeight
-    if (cursorY + blockHeight > bottom) break
-
-    ctx.font = `bold ${fontSize}px sans-serif`
-    ctx.fillStyle = '#000000'
-    cursorY += drawWrappedTitle(ctx, row.title, contentLeft, cursorY, maxLabelWidth, titleLineHeight)
-
-    ctx.font = `${cornerFontSize}px sans-serif`
-    if (aboveLines > 0) {
+      ctx.font = cornerFont
       ctx.textAlign = 'right'
-      leftLines.forEach((line, index) => { ctx.fillText(line, gridX - labelGap, cursorY + cornerLineHeight / 2 + index * cornerLineHeight) })
+      drawLines(ctx, leftLines, gridX - labelGap, cursorY, cornerLineHeight)
       ctx.textAlign = 'left'
-      topLines.forEach((line, index) => { ctx.fillText(line, gridX + gridSize + labelGap, cursorY + cornerLineHeight / 2 + index * cornerLineHeight) })
+      drawLines(ctx, topLines, gridX + gridSize + labelGap, cursorY, cornerLineHeight)
       cursorY += aboveLines * cornerLineHeight
-    }
 
-    const n = row.colors.length
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        // colors[0] is the "low" row in the SDK's own data — drawn at the bottom of the grid so the
-        // grid reads bottom-to-top the same way the "top" corner label above implies.
-        const x = gridX + c * cellSize
-        const y = cursorY + (n - 1 - r) * cellSize
-        ctx.fillStyle = row.colors[r][c]
-        ctx.fillRect(x, y, cellSize, cellSize)
-        ctx.strokeStyle = '#999999'
-        ctx.strokeRect(x, y, cellSize, cellSize)
+      const n = row.colors.length
+      for (let r = 0; r < n; r++) {
+        for (let c = 0; c < n; c++) {
+          // colors[0] is the SDK's "low" row — drawn at the bottom so the grid reads bottom-to-top.
+          const cellX = gridX + c * cellSize
+          const cellY = cursorY + (n - 1 - r) * cellSize
+          ctx.fillStyle = row.colors[r][c]
+          ctx.fillRect(cellX, cellY, cellSize, cellSize)
+          ctx.strokeStyle = '#999999'
+          ctx.strokeRect(cellX, cellY, cellSize, cellSize)
+        }
       }
-    }
-    cursorY += gridSize
+      cursorY += gridSize
 
-    if (belowLines > 0) {
+      ctx.fillStyle = '#000000'
       ctx.textAlign = 'right'
-      bottomLines.forEach((line, index) => { ctx.fillText(line, gridX - labelGap, cursorY + cornerLineHeight / 2 + index * cornerLineHeight) })
+      drawLines(ctx, bottomLines, gridX - labelGap, cursorY, cornerLineHeight)
       ctx.textAlign = 'left'
-      rightLines.forEach((line, index) => { ctx.fillText(line, gridX + gridSize + labelGap, cursorY + cornerLineHeight / 2 + index * cornerLineHeight) })
-      cursorY += belowLines * cornerLineHeight
+      drawLines(ctx, rightLines, gridX + gridSize + labelGap, cursorY, cornerLineHeight)
     }
-    ctx.textAlign = 'left'
-    cursorY += sectionGap
   }
-  return cursorY - top
 }
 
-// Graduated circles at the SDK's own computed sizes (a size visual variable — e.g. wildfire hectares,
-// each category a differently-sized circle of the same color) rather than identical fixed-size swatches,
-// which lost that size information entirely. Stacked largest-to-smallest, matching the order the SDK
-// itself provides and the built-in legend's own vertical layout for this element type.
-function paintSizeRamps (
-  ctx: Painter,
-  element: LegendElement,
-  rows: Array<Extract<LegendRow, { kind: 'size' }>>,
-  top: number,
-  style: LegendPaintStyle
-): number {
-  if (rows.length === 0) return 0
-  const { bottom, fontSize, scale, padding } = style
-
+// Graduated circles at the SDK's own computed sizes (a size visual variable), largest first as the SDK
+// provides them: a title block kept with the first circle, then one block per circle, so a long size
+// ramp can continue in the next column.
+function sizeBlocks (ctx: Painter, row: Extract<LegendRow, { kind: 'size' }>, indent: number, width: number, metrics: LegendMetrics): Block[] {
+  if (row.stops.length === 0) return []
+  const { fontSize, scale } = metrics
   const titleLineHeight = fontSize * 1.3
   const rowGap = 4 * scale
   const sectionGap = 10 * scale
   const labelGap = 6 * scale
-  const circleX = element.x + padding
-  const titleMaxWidth = Math.max(0, element.w - padding * 2)
+  const maxDiameter = Math.max(4, ...row.stops.map((stop) => stop.size)) * scale
+  const titleFont = `bold ${fontSize}px sans-serif`
+  const labelFont = `${fontSize}px sans-serif`
+  ctx.font = titleFont
+  const titleLines = row.title ? wrapTitle(ctx, row.title, width) : []
 
-  let cursorY = top
-  for (const row of rows) {
-    if (row.stops.length === 0) continue
-    const maxDiameter = Math.max(4, ...row.stops.map((stop) => stop.size)) * scale
-    const rowHeight = maxDiameter + rowGap
-    const blockHeight = titleLineHeight * MAX_TITLE_LINES + row.stops.length * rowHeight
-    if (cursorY + blockHeight > bottom) break
-
-    ctx.font = `bold ${fontSize}px sans-serif`
-    ctx.fillStyle = '#000000'
-    cursorY += drawWrappedTitle(ctx, row.title, circleX, cursorY, titleMaxWidth, titleLineHeight)
-
-    ctx.font = `${fontSize}px sans-serif`
-    ctx.textAlign = 'left'
-    for (const stop of row.stops) {
-      const diameter = Math.max(4, stop.size * scale)
-      const cx = circleX + maxDiameter / 2
-      const cy = cursorY + maxDiameter / 2
-      ctx.fillStyle = stop.color
-      ctx.beginPath()
-      ctx.arc(cx, cy, diameter / 2, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#999999'
-      ctx.stroke()
+  const blocks: Block[] = [{
+    height: titleLines.length * titleLineHeight,
+    keepWithNext: true,
+    draw: (x, y) => {
+      ctx.font = titleFont
       ctx.fillStyle = '#000000'
-      ctx.fillText(stop.label, circleX + maxDiameter + labelGap, cy)
-      cursorY += rowHeight
+      drawLines(ctx, titleLines, x + indent, y, titleLineHeight)
     }
-    cursorY += sectionGap
-  }
-  return cursorY - top
+  }]
+  row.stops.forEach((stop, index) => {
+    blocks.push({
+      height: maxDiameter + rowGap + (index === row.stops.length - 1 ? sectionGap : 0),
+      draw: (x, y) => {
+        const circleLeft = x + indent
+        const diameter = Math.max(4, stop.size * scale)
+        const cx = circleLeft + maxDiameter / 2
+        const cy = y + maxDiameter / 2
+        ctx.fillStyle = stop.color
+        ctx.beginPath()
+        ctx.arc(cx, cy, diameter / 2, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.strokeStyle = '#999999'
+        ctx.stroke()
+        ctx.font = labelFont
+        ctx.fillStyle = '#000000'
+        ctx.textAlign = 'left'
+        ctx.fillText(stop.label, circleLeft + maxDiameter + labelGap, cy)
+      }
+    })
+  })
+  return blocks
+}
+
+// Wraps a title onto up to MAX_TITLE_LINES lines (the last ellipsized if still too long). Caller sets
+// ctx.font. An empty title takes no space at all (some legend elements, e.g. a relationship ramp,
+// legitimately have none) rather than leaving a blank line.
+function wrapTitle (ctx: Painter, text: string, maxWidth: number): string[] {
+  return text ? wrapText(ctx, text, maxWidth, MAX_TITLE_LINES) : []
+}
+
+// textBaseline is 'middle' throughout this renderer, so each line is drawn at its own vertical centre.
+function drawLines (ctx: Painter, lines: string[], x: number, top: number, lineHeight: number): void {
+  lines.forEach((line, index) => { ctx.fillText(line, x, top + lineHeight / 2 + index * lineHeight) })
 }
