@@ -4,7 +4,7 @@ A custom [ArcGIS Experience Builder](https://developers.arcgis.com/experience-bu
 
 > Print Studio grew out of `print-export-widget` (now archived), adding vector PDF export, true-scale printing, GeoPDF output and viewer-created templates. The design decisions are recorded in `print-studio-spec.md`.
 
-**[Try the live demo](https://mhoyland.github.io/widget-experience/)** · **[User guide](docs/user-guide.md)** ([web version](https://mhoyland.github.io/widget-experience/help/))
+**[Try the live demo](https://mhoyland.github.io/widget-experience/)** · **[User guide](docs/user-guide.md)** ([web version](https://mhoyland.github.io/widget-experience/help/print-studio/))
 
 ![Example export produced by the widget](screenshots/example-export.png)
 
@@ -51,7 +51,7 @@ In the widget's Setting panel:
 
 ## Notes
 
-- The user guide lives in `docs/user-guide.md`, with screenshots in `docs/images/`. `node docs/build-help-page.mjs <folder>` (run inside the Experience Builder client) turns it into the web page published with the demo site.
+- The user guide lives in `docs/user-guide.md`, with screenshots in `docs/images/`. `node docs/build-help-page.mjs <folder>` (run inside the Experience Builder client) turns it into a web page; the demo site's copy is built with `node docs/build-help-page.mjs <demo site>/help/print-studio ../../`.
 
 - `print-studio-spec.md` is the original phase-by-phase build spec this widget was developed against — kept for anyone curious about the design decisions behind it.
 - This widget has no automated test suite; verification during development was done via `tsc`/`eslint` plus manual testing in a running Experience.

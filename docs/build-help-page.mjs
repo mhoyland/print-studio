@@ -1,7 +1,7 @@
 // Builds the Print Studio user guide web page from docs/user-guide.md.
 //
-//   node docs/build-help-page.mjs <output folder>
-//   e.g. node docs/build-help-page.mjs ~/Widget-Experience/help
+//   node docs/build-help-page.mjs <output folder> [link back to the demo app]
+//   e.g. node docs/build-help-page.mjs ~/Widget-Experience/help/print-studio ../../
 //
 // Writes <output folder>/index.html and copies docs/images/ next to it. Screenshots that don't exist
 // yet appear as labelled placeholder boxes, so the page can be published before they're all taken.
@@ -14,6 +14,8 @@ import { marked } from 'marked'
 
 const docsDir = dirname(fileURLToPath(import.meta.url))
 const outDir = resolve(process.argv[2] ?? join(docsDir, 'site'))
+// Relative to the page, so it depends on where the page is published (default: one folder below the app).
+const appLink = process.argv[3] ?? '../'
 const imagesDir = join(docsDir, 'images')
 
 const markdown = readFileSync(join(docsDir, 'user-guide.md'), 'utf8')
@@ -109,7 +111,7 @@ const html = `<!doctype html>
 <body>
 <header class="site"><div class="inner">
   <span class="brand">Print Studio · User guide</span>
-  <a href="../">← Back to the demo app</a>
+  <a href="${appLink}">← Back to the demo app</a>
 </div></header>
 <div class="layout">
   <nav class="toc" aria-label="Contents"><h2>Contents</h2><ol>${toc}</ol></nav>
