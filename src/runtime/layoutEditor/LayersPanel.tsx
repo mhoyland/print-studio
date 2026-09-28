@@ -61,7 +61,10 @@ const LayersPanel = (props: LayersPanelProps): React.ReactElement => {
             style={{
               cursor: 'pointer',
               gap: 4,
-              backgroundColor: isSelected ? 'var(--sys-color-action-selected)' : 'transparent'
+              backgroundColor: isSelected ? 'var(--sys-color-action-selected)' : 'transparent',
+              // The theme's text colour paired with its selected background, so the name and icons stay
+              // readable on a dark selection colour (they inherit it via currentColor).
+              color: isSelected ? 'var(--sys-color-action-selected-text)' : undefined
             }}
           >
             <IconButton

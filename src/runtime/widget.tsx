@@ -1,6 +1,6 @@
 import { React, Immutable, hooks, ReactRedux, WidgetState, type AllWidgetProps, type IMState } from 'jimu-core'
 import { JimuMapViewComponent, type JimuMapView } from 'jimu-arcgis'
-import { Button, Checkbox, Label, TextArea, Select, Option, Radio, NumericInput } from 'jimu-ui'
+import { Button, Checkbox, Label, Select, Option, Radio, NumericInput } from 'jimu-ui'
 import * as reactiveUtils from 'esri/core/reactiveUtils'
 import { ArrowLeftOutlined } from 'jimu-icons/outlined/directional/arrow-left'
 import { EditOutlined } from 'jimu-icons/outlined/editor/edit'
@@ -23,6 +23,7 @@ import { layoutFingerprint, templateFileStatus, type TemplateFileStatus } from '
 import { InfoOutlined } from 'jimu-icons/outlined/suggested/info'
 import { createBlankLayout, duplicateLayout, uniqueTemplateName } from './templateFactory'
 import TemplatePicker from './TemplatePicker'
+import AutoGrowTextArea from './AutoGrowTextArea'
 import PrintAreaOverlay from './PrintAreaOverlay'
 import defaultMessages from '../translations/default'
 
@@ -359,9 +360,8 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
               {editableTextElements.map((element) => (
                 <div className="mb-2" key={element.id}>
                   <Label for={`print-export-text-${element.id}`}>{element.name}</Label>
-                  <TextArea
+                  <AutoGrowTextArea
                     id={`print-export-text-${element.id}`}
-                    height={34}
                     value={textValues[element.id] ?? element.text}
                     onChange={(evt) => { onTextChange(element.id, evt.target.value) }}
                   />
@@ -551,7 +551,7 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
                 aria-busy={isExporting}
                 onClick={() => { void onExportClick() }}
               >
-                {isExporting ? translate('exporting') : translate('export')}
+                {isExporting ? translate('printingButton') : translate('printButton')}
               </Button>
             </div>
             {exportError && <div role="alert" className="mt-2" style={{ color: 'var(--sys-color-error)', flexShrink: 0 }}>{exportError}</div>}

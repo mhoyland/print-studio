@@ -11,8 +11,8 @@ export interface PortalImagePickerProps {
 
 const MAX_IMAGE_BYTES = 1024 * 1024
 const SCOPE_OPTIONS: Array<{ value: PortalImageScope; labelKey: string }> = [
-  { value: 'mine', labelKey: 'myContent' },
-  { value: 'org', labelKey: 'myOrganization' }
+  { value: 'mine', labelKey: 'portalMyContent' },
+  { value: 'org', labelKey: 'portalMyOrganization' }
 ]
 
 // Design-time only — browses the signed-in user's own or org's "Image" items (an unscoped search

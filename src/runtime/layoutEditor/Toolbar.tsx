@@ -66,7 +66,9 @@ const Toolbar = (props: ToolbarProps): React.ReactElement => {
               height: 56,
               width: 72,
               marginBottom: 4,
-              backgroundColor: isPending ? 'var(--sys-color-action-selected)' : undefined
+              backgroundColor: isPending ? 'var(--sys-color-action-selected)' : undefined,
+              // Paired theme text colour, so the icon and label stay readable on the selected background.
+              color: isPending ? 'var(--sys-color-action-selected-text)' : undefined
             }}
             onClick={addable ? () => { onSelectTool(type as AddableElementType) } : undefined}
           >

@@ -100,7 +100,7 @@ const ImageProps = (props: ImagePropsProps): React.ReactElement => {
                   onChange={onFileSelected}
                 />
                 <Button size="sm" block onClick={() => { fileInputRef.current?.click() }}>
-                  {element.url ? translate('replaceImage') : translate('uploadImage')}
+                  {element.url ? translate('replaceImage') : translate('uploadImageFile')}
                 </Button>
                 <div className="text-disabled small mt-1">{translate('pngOrSvgUpTo1Mb')}</div>
                 {error && <div className="small" style={{ color: 'var(--sys-color-error)' }}>{error}</div>}
