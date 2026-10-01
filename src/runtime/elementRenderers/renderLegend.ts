@@ -3,6 +3,7 @@ import type { LegendElement } from '../../config'
 import { paintContainer } from './paintContainer'
 import { wrapText } from './textLayout'
 import type { Painter } from './painter'
+import { previewToImage, type SymbolImage } from './symbolImage'
 
 export const DEFAULT_FONT_SIZE = 11
 export const DEFAULT_TITLE = 'Legend'
@@ -15,11 +16,14 @@ const MAX_TITLE_LINES = 2 // caps how far a long layer/section title or swatch l
 // "Predominant category + Strength of predominance" census layers combine one of these with a ramp),
 // or a set of graduated circles (a size visual variable). Any legend element type without a dedicated
 // row kind here falls back to a single labeled swatch — see legendElementToRows' default case.
+// `image` is the symbol as the Legend widget draws it (symbolImage.ts); `color`/`icon` are the fallback
+// when no image could be made.
 export type LegendRow =
-  | { kind: 'swatch'; label: string; color: string; icon: IconShape | null }
+  | { kind: 'heading'; title: string }
+  | { kind: 'swatch'; label: string; color: string; icon: IconShape | null; image: SymbolImage | null }
   | { kind: 'ramp'; title: string; stops: Array<{ color: string; label: string }> }
   | { kind: 'relationship'; title: string; colors: string[][]; labels: { top: string; bottom: string; left: string; right: string } }
-  | { kind: 'size'; title: string; stops: Array<{ label: string; color: string; size: number }> }
+  | { kind: 'size'; title: string; stops: Array<{ label: string; color: string; size: number; image: SymbolImage | null }> }
 
 // One row per contributing layer (or sub-layer, for a GroupLayer/multi-scale layer — see `indent`),
 // each with its own title shown above its own symbology — rather than one flat pooled list of rows
@@ -54,7 +58,7 @@ export async function computeLegendGroups (view: __esri.MapView | __esri.SceneVi
     await reactiveUtils.whenOnce(() => viewModel.state === 'ready')
     const infos = viewModel.activeLayerInfos.toArray()
     await Promise.all(infos.map(async (info) => { await waitUntilReady(info, reactiveUtils) }))
-    return infos.flatMap((info) => flattenActiveLayerInfo(info, 0))
+    return (await Promise.all(infos.map(async (info) => await flattenActiveLayerInfo(info, 0)))).flat()
   } finally {
     viewModel.destroy()
   }
@@ -74,25 +78,44 @@ async function waitUntilReady (info: __esri.ActiveLayerInfo, reactiveUtils: type
 // that does) — a pure container (a GroupLayer with no renderer of its own, only sub-layer children)
 // still gets its own title-only group, matching the built-in legend's "layer name" header appearing
 // above a nested "County"-style sub-layer heading, rather than only showing the innermost sub-layer.
-function flattenActiveLayerInfo (info: __esri.ActiveLayerInfo, indent: number): LegendGroup[] {
+async function flattenActiveLayerInfo (info: __esri.ActiveLayerInfo, indent: number): Promise<LegendGroup[]> {
   const title = info.title ?? 'Layer'
-  const rows = (info.legendElements ?? []).flatMap((element) => legendElementToRows(element, title))
-  const childGroups = (info.children?.toArray?.() ?? []).flatMap((child) => flattenActiveLayerInfo(child, indent + 1))
+  const rows = (await Promise.all((info.legendElements ?? []).map(async (element) => await legendElementToRows(element, title)))).flat()
+  const childGroups = (await Promise.all((info.children?.toArray?.() ?? []).map(async (child) => await flattenActiveLayerInfo(child, indent + 1)))).flat()
   const ownGroup: LegendGroup[] = (rows.length > 0 || childGroups.length > 0) ? [{ title, indent, rows }] : []
   return [...ownGroup, ...childGroups]
 }
 
-function legendElementToRows (element: __esri.LegendElement, fallbackTitle: string): LegendRow[] {
+// The SDK's LegendViewModel draws each symbol's preview (an <svg>, <img> or <canvas>, at the size the
+// Legend widget shows it) onto the legend element info as `preview`. It isn't in the SDK's typings, but it
+// is what the Legend widget itself displays, so using it makes printed symbols match the widget.
+const previewOf = (info: unknown): Element | null => {
+  const preview = (info as { preview?: unknown })?.preview
+  return preview instanceof Element ? preview : null
+}
+
+async function legendElementToRows (element: __esri.LegendElement, fallbackTitle: string): Promise<LegendRow[]> {
   switch (element.type) {
-    case 'symbol-table':
-      return (element.infos ?? [])
-        .filter((info): info is __esri.SymbolTableElementInfo => !!(info as __esri.SymbolTableElementInfo)?.symbol)
-        .map((info) => ({
-          kind: 'swatch' as const,
-          label: resolveTitle(info.label) || fallbackTitle,
-          color: symbolToCss(info.symbol),
-          icon: parsePathIcon(info.symbol)
+    case 'symbol-table': {
+      // The list's own title (e.g. "USA Wildfire Incidents (Acres)"), shown above its symbols as the Legend
+      // widget does. Only a real title: a bare field name isn't, and repeating the layer's title isn't useful.
+      const listTitle = symbolTableTitle(element.title)
+      const heading: LegendRow[] = listTitle && listTitle !== fallbackTitle ? [{ kind: 'heading', title: listTitle }] : []
+      // Symbol rows, plus image rows (a map image layer's legend comes from its service as pictures).
+      const symbols: LegendRow[] = await Promise.all((element.infos ?? [])
+        .filter((info) => !!(info as __esri.SymbolTableElementInfo)?.symbol || !!previewOf(info))
+        .map(async (info) => {
+          const symbol = (info as __esri.SymbolTableElementInfo).symbol
+          return {
+            kind: 'swatch' as const,
+            label: resolveTitle((info as { label?: unknown }).label) || fallbackTitle,
+            color: symbolToCss(symbol),
+            icon: parsePathIcon(symbol),
+            image: await previewToImage(previewOf(info))
+          }
         }))
+      return symbols.length > 0 ? [...heading, ...symbols] : []
+    }
     case 'opacity-ramp':
     case 'color-ramp':
     case 'stretch-ramp':
@@ -128,18 +151,19 @@ function legendElementToRows (element: __esri.LegendElement, fallbackTitle: stri
       return [{
         kind: 'size' as const,
         title: resolveTitle(element.title),
-        stops: (element.infos ?? []).map((stop) => ({
+        stops: await Promise.all((element.infos ?? []).map(async (stop) => ({
           label: stop.label ?? String(stop.value ?? ''),
           color: symbolToCss(stop.symbol),
-          size: typeof stop.size === 'number' ? stop.size : (stop.size?.width ?? 12)
-        }))
+          size: typeof stop.size === 'number' ? stop.size : (stop.size?.width ?? 12),
+          image: await previewToImage(previewOf(stop))
+        })))
       }]
     default:
       // HeatmapRampElement, UnivariateColorSizeRampElement, PieChartRampElement — no dedicated visual
       // for these yet. A single labeled swatch beats silently dropping the layer's content entirely,
       // matching this element's existing fallback philosophy — and it's now at least correctly grouped
       // under its own layer title rather than floating in an unlabeled flat list.
-      return [{ kind: 'swatch' as const, label: resolveTitle((element as { title?: unknown }).title) || fallbackTitle, color: '#888888', icon: null }]
+      return [{ kind: 'swatch' as const, label: resolveTitle((element as { title?: unknown }).title) || fallbackTitle, color: '#888888', icon: null, image: null }]
   }
 }
 
@@ -155,6 +179,12 @@ function resolveTitle (title: unknown): string {
     if (typeof candidate.field === 'string') return candidate.field
   }
   return ''
+}
+
+function symbolTableTitle (title: unknown): string {
+  if (typeof title === 'string') return title
+  const candidate = title as { title?: unknown } | null
+  return typeof candidate?.title === 'string' ? candidate.title : ''
 }
 
 function symbolToCss (symbol: __esri.SymbolTableElementInfo['symbol'] | undefined): string {
@@ -443,10 +473,14 @@ function groupBlocks (ctx: Painter, group: LegendGroup, columnWidth: number, met
   })
 
   const swatches = group.rows.filter((row): row is Extract<LegendRow, { kind: 'swatch' }> => row.kind === 'swatch')
+  // One symbol column per layer, as wide as its widest symbol, so the labels line up.
+  const symbolWidth = Math.max(12 * metrics.scale, ...swatches.map((row) => (row.image ? row.image.width * metrics.scale : 0)))
   const sectionStart = blocks.length
-  blocks.push(...swatches.map((row) => swatchBlock(ctx, row, indent, width, metrics)))
+  // In the SDK's order, as the Legend widget shows them.
   for (const row of group.rows) {
-    if (row.kind === 'ramp') blocks.push(rampBlock(ctx, row, indent, width, metrics))
+    if (row.kind === 'heading') blocks.push(headingBlock(ctx, row, indent, width, metrics))
+    else if (row.kind === 'swatch') blocks.push(swatchBlock(ctx, row, indent, width, symbolWidth, metrics))
+    else if (row.kind === 'ramp') blocks.push(rampBlock(ctx, row, indent, width, metrics))
     else if (row.kind === 'relationship') blocks.push(relationshipBlock(ctx, row, indent, width, metrics))
     else if (row.kind === 'size') blocks.push(...sizeBlocks(ctx, row, indent, width, metrics))
   }
@@ -455,21 +489,45 @@ function groupBlocks (ctx: Painter, group: LegendGroup, columnWidth: number, met
   return blocks
 }
 
-function swatchBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'swatch' }>, indent: number, width: number, metrics: LegendMetrics): Block {
+// A symbol list's own title, kept with the first symbol after it. Not bold, as in the Legend widget.
+function headingBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'heading' }>, indent: number, width: number, metrics: LegendMetrics): Block {
+  const { fontSize, scale } = metrics
+  const lineHeight = fontSize * 1.3
+  const font = `${fontSize}px sans-serif`
+  ctx.font = font
+  const lines = wrapTitle(ctx, row.title, width)
+  return {
+    height: lines.length * lineHeight + 2 * scale,
+    keepWithNext: true,
+    draw: (x, y) => {
+      ctx.font = font
+      ctx.fillStyle = '#000000'
+      drawLines(ctx, lines, x + indent, y, lineHeight)
+    }
+  }
+}
+
+// `symbolWidth`: the layer's symbol column (swatchSize, or its widest symbol image).
+function swatchBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'swatch' }>, indent: number, width: number, symbolWidth: number, metrics: LegendMetrics): Block {
   const { fontSize, scale } = metrics
   const swatchSize = 12 * scale
   const labelGap = 6 * scale
   const labelLineHeight = fontSize * 1.15
   const font = `${fontSize}px sans-serif`
   ctx.font = font
-  const lines = wrapText(ctx, row.label, Math.max(0, width - swatchSize - labelGap), MAX_TITLE_LINES)
+  const lines = wrapText(ctx, row.label, Math.max(0, width - symbolWidth - labelGap), MAX_TITLE_LINES)
   const textHeight = lines.length * labelLineHeight
-  const height = Math.max(swatchSize, textHeight) + 4 * scale
+  const symbolHeight = row.image ? row.image.height * scale : swatchSize
+  const rowHeight = Math.max(symbolHeight, textHeight)
+  const height = rowHeight + 4 * scale
   return {
     height,
     draw: (x, y) => {
       const left = x + indent
-      if (row.icon) {
+      if (row.image) {
+        const imageWidth = row.image.width * scale
+        ctx.drawImage(row.image.canvas, left + (symbolWidth - imageWidth) / 2, y + (rowHeight - symbolHeight) / 2, imageWidth, symbolHeight)
+      } else if (row.icon) {
         drawPathIcon(ctx, row.icon, left + swatchSize / 2, y + swatchSize / 2, swatchSize)
       } else {
         ctx.fillStyle = row.color
@@ -480,8 +538,8 @@ function swatchBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'swatch' }>,
       ctx.font = font
       ctx.fillStyle = '#000000'
       ctx.textAlign = 'left'
-      const textTop = y + Math.max(swatchSize, textHeight) / 2 - textHeight / 2
-      drawLines(ctx, lines, left + swatchSize + labelGap, textTop, labelLineHeight)
+      const textTop = y + rowHeight / 2 - textHeight / 2
+      drawLines(ctx, lines, left + symbolWidth + labelGap, textTop, labelLineHeight)
     }
   }
 }
@@ -604,7 +662,8 @@ function relationshipBlock (ctx: Painter, row: Extract<LegendRow, { kind: 'relat
 
 // Graduated circles at the SDK's own computed sizes (a size visual variable), largest first as the SDK
 // provides them: a title block kept with the first circle, then one block per circle, so a long size
-// ramp can continue in the next column.
+// ramp can continue in the next column. Each row is as tall as its own symbol (or its label), as in the
+// Legend widget, while the symbols share one column as wide as the largest so the labels line up.
 function sizeBlocks (ctx: Painter, row: Extract<LegendRow, { kind: 'size' }>, indent: number, width: number, metrics: LegendMetrics): Block[] {
   if (row.stops.length === 0) return []
   const { fontSize, scale } = metrics
@@ -612,7 +671,9 @@ function sizeBlocks (ctx: Painter, row: Extract<LegendRow, { kind: 'size' }>, in
   const rowGap = 4 * scale
   const sectionGap = 10 * scale
   const labelGap = 6 * scale
-  const maxDiameter = Math.max(4, ...row.stops.map((stop) => stop.size)) * scale
+  // The widest symbol sets the column, so the labels line up; a symbol image is drawn at its own size.
+  const stopSize = (stop: (typeof row.stops)[number]): number => (stop.image ? Math.max(stop.image.width, stop.image.height) : stop.size)
+  const maxDiameter = Math.max(4, ...row.stops.map(stopSize)) * scale
   const titleFont = `bold ${fontSize}px sans-serif`
   const labelFont = `${fontSize}px sans-serif`
   ctx.font = titleFont
@@ -628,19 +689,26 @@ function sizeBlocks (ctx: Painter, row: Extract<LegendRow, { kind: 'size' }>, in
     }
   }]
   row.stops.forEach((stop, index) => {
+    const rowHeight = Math.max(Math.max(4, stopSize(stop)) * scale, fontSize * 1.15)
     blocks.push({
-      height: maxDiameter + rowGap + (index === row.stops.length - 1 ? sectionGap : 0),
+      height: rowHeight + rowGap + (index === row.stops.length - 1 ? sectionGap : 0),
       draw: (x, y) => {
         const circleLeft = x + indent
         const diameter = Math.max(4, stop.size * scale)
         const cx = circleLeft + maxDiameter / 2
-        const cy = y + maxDiameter / 2
-        ctx.fillStyle = stop.color
-        ctx.beginPath()
-        ctx.arc(cx, cy, diameter / 2, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.strokeStyle = '#999999'
-        ctx.stroke()
+        const cy = y + rowHeight / 2
+        if (stop.image) {
+          const imageWidth = stop.image.width * scale
+          const imageHeight = stop.image.height * scale
+          ctx.drawImage(stop.image.canvas, cx - imageWidth / 2, cy - imageHeight / 2, imageWidth, imageHeight)
+        } else {
+          ctx.fillStyle = stop.color
+          ctx.beginPath()
+          ctx.arc(cx, cy, diameter / 2, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.strokeStyle = '#999999'
+          ctx.stroke()
+        }
         ctx.font = labelFont
         ctx.fillStyle = '#000000'
         ctx.textAlign = 'left'
